@@ -44,8 +44,8 @@ typedef struct Args
   bool poly;
 } Args;
 
-typedef FieldAccessor<READ_ONLY, double, 2> AccessorRO;
-typedef FieldAccessor<WRITE_DISCARD, double, 2> AccessorWO;
+typedef FieldAccessor<READ_ONLY, double, 1> AccessorRO;
+typedef FieldAccessor<WRITE_DISCARD, double, 1> AccessorWO;
 typedef std::map<FieldID, AccessorRO> ReadAccs;
 
 void check_return(int rc, const char *statement)
@@ -63,9 +63,9 @@ void modify_field_task(const Task *task,
   FieldID fid = *(task->regions[0].privilege_fields.begin());
   const AccessorWO acc(regions[0], fid);
 
-  Rect<2> rect = runtime->get_index_space_domain(ctx, task->regions[0].region.get_index_space());
+  Rect<1> rect = runtime->get_index_space_domain(ctx, task->regions[0].region.get_index_space());
 
-  for (PointInRectIterator<2> pir(rect); pir(); pir++)
+  for (PointInRectIterator<1> pir(rect); pir(); pir++)
     acc[*pir] = drand48();
 }
 
@@ -73,11 +73,11 @@ void dump_fields_task(const Task *task,
                       const std::vector<PhysicalRegion> &regions,
                       Context ctx, Runtime *runtime)
 {
-  const Rect<2> bounds = runtime->get_index_space_domain(
+  const Rect<1> bounds = runtime->get_index_space_domain(
                           task->regions[0].region.get_index_space());
   // UNCOMMENT THIS IF YOUR TASK IS BEING INDEX SPACE LAUNCHED
   // const Point<2> point = task->index_point;
-  const Point<2> point(0, 0);
+  const Point<1> point(0);
 
   const Args *args = (const Args*)(task->args);
   const char *taskname = args->taskname;
@@ -91,14 +91,12 @@ void dump_fields_task(const Task *task,
   create << "CREATE TABLE IF NOT EXISTS " << taskname << " (" << std::endl;
   create << "TIMESTEP int NOT NULL, " << std::endl;
   create << "SUBREGION_X int NOT NULL," << std::endl;
-  create << "SUBREGION_Y int NOT NULL," << std::endl;
   create << "IDX_X int NOT NULL," << std::endl;
-  create << "IDX_Y int NOT NULL," << std::endl;
 
   std::stringstream insert;
 
   insert << "INSERT INTO " << taskname
-         << " VALUES (@TIMESTEP, @SUBREGION_X, @SUBREGION_Y, @IDX_X, @IDX_Y, ";
+         << " VALUES (@TIMESTEP, @SUBREGION_X, @IDX_X, ";
 
   std::map<FieldID, AccessorRO> field_accs;
 
@@ -159,8 +157,6 @@ void dump_fields_task(const Task *task,
 
   sqlite3_bind_int(insert_stmt, 1, timestep);
   sqlite3_bind_int(insert_stmt, 2, point[0]);
-  sqlite3_bind_int(insert_stmt, 3, point[1]);
-
 
   clock_t cStartClock = clock();
   rc = sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, &errMsg);
@@ -168,47 +164,40 @@ void dump_fields_task(const Task *task,
 
   if(!poly)
   {
-    for (long long y = bounds.lo[1]; y <= bounds.hi[1]; y++)
+    for (long long x = bounds.lo[0]; x <= bounds.hi[0]; x++)
     {
-      sqlite3_bind_int(insert_stmt, 5, y);
-      for (long long x = bounds.lo[0]; x <= bounds.hi[0]; x++)
-      {
-        sqlite3_bind_int(insert_stmt, 4, x);
+      sqlite3_bind_int(insert_stmt, 3, x);
 
-        int field = 6;
-        for(std::map<FieldID, AccessorRO>::iterator it = field_accs.begin(); it != field_accs.end(); ++it)
-        {
-          sqlite3_bind_double(insert_stmt, field, (it->second)[x][y]);
-          field++;
-        }
-        n++;
-        sqlite3_step(insert_stmt);
-        sqlite3_reset(insert_stmt);
+      int field = 4;
+      for(std::map<FieldID, AccessorRO>::iterator it = field_accs.begin(); it != field_accs.end(); ++it)
+      {
+        sqlite3_bind_double(insert_stmt, field, (it->second)[x]);
+        field++;
       }
+      n++;
+      sqlite3_step(insert_stmt);
+      sqlite3_reset(insert_stmt);
     }
   }
   else
   {
-    for (long long y = bounds.lo[1]; y <= bounds.hi[1]; y++)
+    for (long long x = bounds.lo[0]; x <= bounds.hi[0]; x++)
     {
-      sqlite3_bind_int(insert_stmt, 5, y);
-      for (long long x = bounds.lo[0]; x <= bounds.hi[0]; x++)
+      sqlite3_bind_int(insert_stmt, 4, x);
+
+      for(std::map<FieldID, AccessorRO>::iterator it = field_accs.begin(); it != field_accs.end(); ++it)
       {
-        sqlite3_bind_int(insert_stmt, 4, x);
+        const char *field_name;
+        runtime->retrieve_name(fspace, it->first, field_name);
 
-        for(std::map<FieldID, AccessorRO>::iterator it = field_accs.begin(); it != field_accs.end(); ++it)
-        {
-          const char *field_name;
-          runtime->retrieve_name(fspace, it->first, field_name);
-
-          sqlite3_bind_text(insert_stmt, 6, field_name, -1, SQLITE_STATIC);
-          n++;
-          sqlite3_bind_double(insert_stmt, 7, (it->second)[x][y]);
-          sqlite3_step(insert_stmt);
-          sqlite3_reset(insert_stmt);
-        }
+        sqlite3_bind_text(insert_stmt, 5, field_name, -1, SQLITE_STATIC);
+        n++;
+        sqlite3_bind_double(insert_stmt, 6, (it->second)[x]);
+        sqlite3_step(insert_stmt);
+        sqlite3_reset(insert_stmt);
       }
     }
+
   }
   sqlite3_finalize(insert_stmt);
   rc = sqlite3_exec(db, "END TRANSACTION", NULL, NULL, &errMsg);
@@ -220,7 +209,7 @@ void top_level_task(const Task *task,
                     Context ctx, Runtime *runtime)
 {
   // Create a dummy region and fill it
-  IndexSpace ispace = runtime->create_index_space(ctx, Domain(Rect<2>(Point<2>(0, 0), Point<2>(19, 19))));
+  IndexSpace ispace = runtime->create_index_space(ctx, Domain(Rect<1>(Point<1>(0), Point<1>(19))));
   FieldSpace fspace = runtime->create_field_space(ctx);
   {
     FieldAllocator falloc = runtime->create_field_allocator(ctx, fspace);
@@ -238,6 +227,7 @@ void top_level_task(const Task *task,
   runtime->fill_field<double>(ctx, region, region, FID_Z, 0);
 
   int rc;
+  remove("test.db");
   rc = sqlite3_open("test.db", &db);
   if ( rc )
   {
