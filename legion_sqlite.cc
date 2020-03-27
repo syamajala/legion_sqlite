@@ -42,12 +42,17 @@ typedef struct Args
   const char *taskname;
   int timestep;
   int stage;
+  int nCoeff;
   bool poly;
 } Args;
 
-typedef FieldAccessor<READ_ONLY, double, 1> AccessorRO;
-typedef FieldAccessor<WRITE_DISCARD, double, 1> AccessorWO;
-typedef std::map<FieldID, AccessorRO> ReadAccs;
+typedef double rtype;
+typedef FieldAccessor< WRITE_DISCARD, rtype, 1, Legion::coord_t,
+                               Realm::AffineAccessor<rtype, 1, Legion::coord_t> > AffAccWOrtype;
+typedef FieldAccessor< READ_ONLY, rtype, 1, Legion::coord_t,
+                       Realm::AffineAccessor<rtype, 1, Legion::coord_t> > AffAccROrtype;
+
+//typedef FieldAccessor<READ_ONLY, double, 1> AccessorRO;
 
 void check_return(int rc, const char *statement)
 {
@@ -62,12 +67,17 @@ void modify_field_task(const Task *task,
                        Context ctx, Runtime *runtime)
 {
   FieldID fid = *(task->regions[0].privilege_fields.begin());
-  const AccessorWO acc(regions[0], fid);
+  const int *nCoeff = (const int*)(task->args);
+  const AffAccWOrtype acc(regions[0], fid, (*nCoeff) * sizeof(rtype));
 
   Rect<1> rect = runtime->get_index_space_domain(ctx, task->regions[0].region.get_index_space());
 
   for (PointInRectIterator<1> pir(rect); pir(); pir++)
-    acc[*pir] = drand48();
+  {
+    rtype *arr = acc.ptr(*pir);
+    for(int i = 0; i < *nCoeff; i++)
+      arr[i] = drand48();
+  }
 }
 
 void dump_fields_task(const Task *task,
@@ -84,6 +94,7 @@ void dump_fields_task(const Task *task,
   const char *taskname = args->taskname;
   const int timestep =  args->timestep;
   const int stage = args->stage;
+  const int nCoeff = args->nCoeff;
   const bool poly = args->poly;
 
   LogicalRegion region(regions[0].get_logical_region());
@@ -101,7 +112,7 @@ void dump_fields_task(const Task *task,
   insert << "INSERT INTO " << taskname
          << " VALUES (@TIMESTEP, @STAGE, @SUBREGION_X, @IDX_X, ";
 
-  std::map<FieldID, AccessorRO> field_accs;
+  std::map<FieldID, AffAccROrtype> field_accs;
 
   if(!poly)
   {
@@ -109,13 +120,23 @@ void dump_fields_task(const Task *task,
     while(it != task->regions[0].privilege_fields.end())
     {
       FieldID fid = *it;
-      const AccessorRO acc(regions[0], fid);
-      field_accs.insert(std::pair<FieldID, AccessorRO>(fid, acc));
+      const AffAccROrtype acc(regions[0], fid, nCoeff*sizeof(rtype));
+      field_accs.insert(std::pair<FieldID, AffAccROrtype>(fid, acc));
 
       const char *field_name;
       runtime->retrieve_name(fspace, fid, field_name);
-      create << field_name << " double NOT NULL";
-      insert << "@" << field_name;
+      for(int i = 0; i < nCoeff; i++)
+      {
+        create << field_name << i << " double NOT NULL";
+        insert << "@" << field_name << i;
+        if (i + 1 < nCoeff)
+        {
+          create << ",";
+          insert << ",";
+        }
+        create << std::endl;
+        insert << " ";
+      }
 
       ++it;
 
@@ -139,15 +160,14 @@ void dump_fields_task(const Task *task,
     while(it != task->regions[0].privilege_fields.end())
     {
       FieldID fid = *it;
-      const AccessorRO acc(regions[0], fid);
-      field_accs.insert(std::pair<FieldID, AccessorRO>(fid, acc));
+      const AffAccROrtype acc(regions[0], fid, nCoeff*sizeof(rtype));
+      field_accs.insert(std::pair<FieldID, AffAccROrtype>(fid, acc));
       ++it;
     }
   }
 
   create << ");";
   insert << ");";
-
   char *errMsg = 0;
   int rc = sqlite3_exec(db, create.str().c_str(), NULL, 0, &errMsg);
   if (rc)
@@ -173,10 +193,15 @@ void dump_fields_task(const Task *task,
       sqlite3_bind_int(insert_stmt, 4, x);
 
       int field = 5;
-      for(std::map<FieldID, AccessorRO>::iterator it = field_accs.begin(); it != field_accs.end(); ++it)
+      for(std::map<FieldID, AffAccROrtype>::iterator it = field_accs.begin(); it != field_accs.end(); ++it)
       {
-        sqlite3_bind_double(insert_stmt, field, (it->second)[x]);
-        field++;
+        const rtype *arr = it->second.ptr(x);
+
+        for(int i = 0; i < nCoeff; i++)
+        {
+          sqlite3_bind_double(insert_stmt, field, arr[i]);
+          field++;
+        }
       }
       n++;
       sqlite3_step(insert_stmt);
@@ -189,7 +214,7 @@ void dump_fields_task(const Task *task,
     {
       sqlite3_bind_int(insert_stmt, 4, x);
 
-      for(std::map<FieldID, AccessorRO>::iterator it = field_accs.begin(); it != field_accs.end(); ++it)
+      for(std::map<FieldID, AffAccROrtype>::iterator it = field_accs.begin(); it != field_accs.end(); ++it)
       {
         const char *field_name;
         runtime->retrieve_name(fspace, it->first, field_name);
@@ -217,18 +242,18 @@ void top_level_task(const Task *task,
   FieldSpace fspace = runtime->create_field_space(ctx);
   {
     FieldAllocator falloc = runtime->create_field_allocator(ctx, fspace);
-    falloc.allocate_field(sizeof(double), FID_X);
+    falloc.allocate_field(sizeof(rtype[3]), FID_X);
     runtime->attach_name(fspace, FID_X, "FID_X");
-    falloc.allocate_field(sizeof(double), FID_Y);
+    falloc.allocate_field(sizeof(rtype[3]), FID_Y);
     runtime->attach_name(fspace, FID_Y, "FID_Y");
-    falloc.allocate_field(sizeof(double), FID_Z);
+    falloc.allocate_field(sizeof(rtype[3]), FID_Z);
     runtime->attach_name(fspace, FID_Z, "FID_Z");
   }
   LogicalRegion region = runtime->create_logical_region(ctx, ispace, fspace);
 
-  runtime->fill_field<double>(ctx, region, region, FID_X, 0);
-  runtime->fill_field<double>(ctx, region, region, FID_Y, 0);
-  runtime->fill_field<double>(ctx, region, region, FID_Z, 0);
+  // runtime->fill_field<double>(ctx, region, region, FID_X, 0);
+  // runtime->fill_field<double>(ctx, region, region, FID_Y, 0);
+  // runtime->fill_field<double>(ctx, region, region, FID_Z, 0);
 
   int rc;
   remove("test.db");
@@ -245,17 +270,20 @@ void top_level_task(const Task *task,
   sqlite3_exec(db, "PRAGMA synchronous = OFF", NULL, NULL, &sErrMsg);
   sqlite3_exec(db, "PRAGMA journal_mode = MEMORY", NULL, NULL, &sErrMsg);
   sqlite3_exec(db, "PRAGMA cache_size=10000", NULL, NULL, &sErrMsg);
+  int nCoeff = 3;
 
   Args arg;
   arg.poly = false;
+  arg.nCoeff = nCoeff;
 
   for(int timestep = 0; timestep < 10; timestep++)
   {
     arg.timestep = timestep;
+
     for(int stage = 0; stage < 3; stage++)
     {
       {
-        TaskLauncher modify_launcher(MODIFY_FIELD_TASK_ID, TaskArgument(NULL, 0));
+        TaskLauncher modify_launcher(MODIFY_FIELD_TASK_ID, TaskArgument(&nCoeff, sizeof(nCoeff)));
         modify_launcher.add_region_requirement(
           RegionRequirement(region, WRITE_DISCARD, EXCLUSIVE, region));
         modify_launcher.add_field(0/*idx*/, FID_X);
