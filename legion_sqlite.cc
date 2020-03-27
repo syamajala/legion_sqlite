@@ -19,6 +19,7 @@
 #include <sstream>
 #include <map>
 #include <sqlite3.h>
+#include <sys/utsname.h>
 #include "legion.h"
 
 using namespace Legion;
@@ -255,9 +256,13 @@ void top_level_task(const Task *task,
   // runtime->fill_field<double>(ctx, region, region, FID_Y, 0);
   // runtime->fill_field<double>(ctx, region, region, FID_Z, 0);
 
-  int rc;
-  remove("test.db");
-  rc = sqlite3_open("test.db", &db);
+  std::stringstream filename;
+  struct utsname buf;
+  uname(&buf);
+  filename << buf.nodename;
+  filename << "_dump.db";
+  int rc = sqlite3_open(filename.str().c_str(), &db);
+
   if ( rc )
   {
     fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
