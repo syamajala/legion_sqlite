@@ -41,6 +41,7 @@ typedef struct Args
 {
   const char *taskname;
   int timestep;
+  int stage;
   bool poly;
 } Args;
 
@@ -82,6 +83,7 @@ void dump_fields_task(const Task *task,
   const Args *args = (const Args*)(task->args);
   const char *taskname = args->taskname;
   const int timestep =  args->timestep;
+  const int stage = args->stage;
   const bool poly = args->poly;
 
   LogicalRegion region(regions[0].get_logical_region());
@@ -90,13 +92,14 @@ void dump_fields_task(const Task *task,
   std::stringstream create;
   create << "CREATE TABLE IF NOT EXISTS " << taskname << " (" << std::endl;
   create << "TIMESTEP int NOT NULL, " << std::endl;
+  create << "STAGE int NOT NULL, " << std::endl;
   create << "SUBREGION_X int NOT NULL," << std::endl;
   create << "IDX_X int NOT NULL," << std::endl;
 
   std::stringstream insert;
 
   insert << "INSERT INTO " << taskname
-         << " VALUES (@TIMESTEP, @SUBREGION_X, @IDX_X, ";
+         << " VALUES (@TIMESTEP, @STAGE, @SUBREGION_X, @IDX_X, ";
 
   std::map<FieldID, AccessorRO> field_accs;
 
@@ -156,7 +159,8 @@ void dump_fields_task(const Task *task,
   rc = sqlite3_prepare_v2(db, insert.str().c_str(), -1, &insert_stmt, NULL);
 
   sqlite3_bind_int(insert_stmt, 1, timestep);
-  sqlite3_bind_int(insert_stmt, 2, point[0]);
+  sqlite3_bind_int(insert_stmt, 2, stage);
+  sqlite3_bind_int(insert_stmt, 3, point[0]);
 
   clock_t cStartClock = clock();
   rc = sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, &errMsg);
@@ -166,9 +170,9 @@ void dump_fields_task(const Task *task,
   {
     for (long long x = bounds.lo[0]; x <= bounds.hi[0]; x++)
     {
-      sqlite3_bind_int(insert_stmt, 3, x);
+      sqlite3_bind_int(insert_stmt, 4, x);
 
-      int field = 4;
+      int field = 5;
       for(std::map<FieldID, AccessorRO>::iterator it = field_accs.begin(); it != field_accs.end(); ++it)
       {
         sqlite3_bind_double(insert_stmt, field, (it->second)[x]);
@@ -201,7 +205,7 @@ void dump_fields_task(const Task *task,
   }
   sqlite3_finalize(insert_stmt);
   rc = sqlite3_exec(db, "END TRANSACTION", NULL, NULL, &errMsg);
-  printf("Imported %d records in %4.2f seconds\n", n, (clock() - cStartClock) / (double)CLOCKS_PER_SEC);
+  printf("TIMESTEP: %d STAGE: %d Imported %d records in %4.2f seconds\n", timestep, stage, n, (clock() - cStartClock) / (double)CLOCKS_PER_SEC);
 }
 
 void top_level_task(const Task *task,
@@ -248,21 +252,25 @@ void top_level_task(const Task *task,
   for(int timestep = 0; timestep < 10; timestep++)
   {
     arg.timestep = timestep;
+    for(int stage = 0; stage < 3; stage++)
     {
-      TaskLauncher modify_launcher(MODIFY_FIELD_TASK_ID, TaskArgument(NULL, 0));
-      modify_launcher.add_region_requirement(
-        RegionRequirement(region, WRITE_DISCARD, EXCLUSIVE, region));
-      modify_launcher.add_field(0/*idx*/, FID_X);
-      runtime->execute_task(ctx, modify_launcher);
-    }
+      {
+        TaskLauncher modify_launcher(MODIFY_FIELD_TASK_ID, TaskArgument(NULL, 0));
+        modify_launcher.add_region_requirement(
+          RegionRequirement(region, WRITE_DISCARD, EXCLUSIVE, region));
+        modify_launcher.add_field(0/*idx*/, FID_X);
+        runtime->execute_task(ctx, modify_launcher);
+      }
 
-    {
-      arg.taskname = "ModifyField";
-      TaskLauncher dump_launcher(DUMP_FIELDS_TASK_ID, TaskArgument(&arg, sizeof(Args)));
-      dump_launcher.add_region_requirement(
-        RegionRequirement(region, READ_ONLY, EXCLUSIVE, region));
-      dump_launcher.add_field(0/*idx*/, FID_X);
-      runtime->execute_task(ctx, dump_launcher);
+      {
+        arg.taskname = "ModifyField";
+        arg.stage = stage;
+        TaskLauncher dump_launcher(DUMP_FIELDS_TASK_ID, TaskArgument(&arg, sizeof(Args)));
+        dump_launcher.add_region_requirement(
+          RegionRequirement(region, READ_ONLY, EXCLUSIVE, region));
+        dump_launcher.add_field(0/*idx*/, FID_X);
+        runtime->execute_task(ctx, dump_launcher);
+      }
     }
   }
 }
